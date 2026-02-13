@@ -8,6 +8,8 @@ Version: 6.5.0
 
 import platform
 import random
+import asyncio
+import re
 
 import aiohttp
 import discord
@@ -321,6 +323,65 @@ class General(commands.Cog, name="general"):
                 color=0xBEBEFE,
             )
         )
+
+    @commands.hybrid_command(
+        name="remind",
+        description="Set a reminder.",
+    )
+    @app_commands.describe(
+        message="The message to be reminded about.",
+        time="The time to wait before the reminder (e.g., 100, 1m30s).",
+    )
+    async def remind(self, context: Context, message: str, time: str) -> None:
+        """
+        Set a reminder.
+
+        :param context: The hybrid command context.
+        :param message: The message to be reminded about.
+        :param time: The time to wait before the reminder (e.g., 100, 1m30s).
+        """
+        seconds = 0
+        matches = re.findall(r"(\d+)([hms]?)", time)
+        if not matches:
+            embed = discord.Embed(
+                description="Invalid time format. Please use seconds (e.g. 100) or format like 1m30s.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        for value, unit in matches:
+            if unit == "h":
+                seconds += int(value) * 3600
+            elif unit == "m":
+                seconds += int(value) * 60
+            elif unit == "s" or unit == "":
+                seconds += int(value)
+
+        if seconds > 600:
+            embed = discord.Embed(
+                description="The time cap is currently 10 minutes (600 seconds).",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if seconds < 1:
+            embed = discord.Embed(
+                description="The time must be at least 1 second.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            description=f"I will remind you about **{message}** in **{seconds}** seconds.",
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
+
+        await asyncio.sleep(seconds)
+        await context.send(f"{context.author.mention}, reminder: **{message}**!")
 
 
 async def setup(bot) -> None:

@@ -64,7 +64,7 @@ It is recommended to use slash commands and therefore not use prefix commands.
 
 If you want to use prefix commands, make sure to also enable the intent below in the Discord developer portal.
 """
-# intents.message_content = True
+intents.message_content = True
 
 # Setup both of the loggers
 
@@ -286,4 +286,11 @@ class DiscordBot(commands.Bot):
 
 
 bot = DiscordBot()
-bot.run(os.getenv("TOKEN"))
+token = os.getenv("TOKEN")
+if not token:
+    logger.critical("The 'TOKEN' environment variable is not set. Please check your .env file.")
+    sys.exit(1)
+try:
+    bot.run(token)
+except discord.errors.LoginFailure:
+    logger.critical("Failed to log in: The provided token is invalid. Please check your .env file.")
