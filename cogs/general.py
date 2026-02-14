@@ -383,6 +383,52 @@ class General(commands.Cog, name="general"):
         await asyncio.sleep(seconds)
         await context.send(f"{context.author.mention}, reminder: **{message}**!")
 
+    @commands.hybrid_command(
+        name="quote",
+        description="Get a random inspirational quote.",
+    )
+    async def quote(self, context: Context) -> None:
+        """
+        Get a random inspirational quote.
+
+        :param context: The hybrid command context.
+        """
+        quotes = [
+            "Dream big. Start small. Act now.",
+            "Success is built on consistency, not motivation.",
+            "You don’t have to be great to start, but you have to start to be great.",
+            "Your future self is watching — don’t disappoint them.",
+            "Hard work beats talent when talent doesn’t work hard."
+        ]
+        embed = discord.Embed(
+            description=random.choice(quotes),
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="joke",
+        description="Get a random joke.",
+    )
+    async def joke(self, context: Context) -> None:
+        """
+        Get a random joke.
+
+        :param context: The hybrid command context.
+        """
+        jokes = [
+            "Why do programmers prefer dark mode? Because light attracts bugs.",
+            "I told my computer I needed a break, and it froze.",
+            "Why did the developer go broke? Because he used up all his cache.",
+            "There are only 10 types of people in the world: those who understand binary and those who don’t.",
+            "My code works… I have no idea why."
+        ]
+        embed = discord.Embed(
+            description=random.choice(jokes),
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
+
 
 async def setup(bot) -> None:
     await bot.add_cog(General(bot))
