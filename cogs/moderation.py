@@ -7,7 +7,8 @@ Version: 6.5.0
 """
 
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
@@ -18,6 +19,29 @@ from discord.ext.commands import Context
 class Moderation(commands.Cog, name="moderation"):
     def __init__(self, bot) -> None:
         self.bot = bot
+
+    @staticmethod
+    def parse_duration(duration: str) -> int:
+        seconds = 0
+        matches = re.findall(r"(\d+)([dhms]?)", duration.lower())
+        if not matches:
+            return 0
+
+        parsed_length = sum(len(value) + len(unit) for value, unit in matches)
+        if parsed_length != len(duration.replace(" ", "")):
+            return 0
+
+        for value, unit in matches:
+            if unit == "d":
+                seconds += int(value) * 86400
+            elif unit == "h":
+                seconds += int(value) * 3600
+            elif unit == "m":
+                seconds += int(value) * 60
+            else:
+                seconds += int(value)
+
+        return seconds
 
     @commands.hybrid_command(
         name="kick",
@@ -155,6 +179,289 @@ class Moderation(commands.Cog, name="moderation"):
             embed = discord.Embed(
                 title="Error!",
                 description="An error occurred while trying to ban the user. Make sure my role is above the role of the user you want to ban.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="role",
+        description="Add or remove a role from a member.",
+    )
+    @commands.has_permissions(manage_roles=True)
+    @commands.bot_has_permissions(manage_roles=True)
+    @app_commands.describe(
+        user="The member whose role should be updated.",
+        action="Whether to add or remove the role.",
+        role="The role to add or remove.",
+    )
+    async def role(
+        self, context: Context, user: discord.Member, action: str, *, role: discord.Role
+    ) -> None:
+        """
+        Add or remove a role from a member.
+
+        :param context: The hybrid command context.
+        :param user: The member whose role should be updated.
+        :param action: Whether to add or remove the role.
+        :param role: The role to add or remove.
+        """
+        guild_me = context.guild.me or await context.guild.fetch_member(self.bot.user.id)
+        member = await context.guild.fetch_member(user.id)
+
+        if role.is_default():
+            await context.send("❌ I cannot add or remove the @everyone role.")
+            return
+
+        if role.managed:
+            await context.send("❌ I cannot modify an integration-managed role.")
+            return
+
+        if role >= guild_me.top_role:
+            await context.send(
+                "❌ I cannot manage that role (it's higher than my highest role)."
+            )
+            return
+
+        if member.top_role >= guild_me.top_role:
+            await context.send(
+                "❌ I cannot modify that user because their highest role is equal to or higher than mine."
+            )
+            return
+
+        if (
+            member.top_role >= context.author.top_role
+            and context.author.id != context.guild.owner_id
+        ):
+            await context.send(
+                f"❌ You cannot modify **{member}** because their highest role (`{member.top_role}`) is equal to or higher than your highest role (`{context.author.top_role}`)."
+            )
+            return
+
+        action = action.lower()
+
+        if action == "add":
+            if role in member.roles:
+                await context.send("⚠️ User already has that role.")
+                return
+
+            try:
+                await member.add_roles(role, reason=f"Role added by {context.author}")
+            except discord.Forbidden:
+                await context.send(
+                    "❌ Discord denied that role change. Check the role hierarchy."
+                )
+                return
+            except discord.HTTPException:
+                await context.send("❌ Discord failed to update that user's roles.")
+                return
+
+            await context.send(f"✅ Added **{role.name}** to {member.mention}")
+            return
+
+        if action == "remove":
+            if role not in member.roles:
+                await context.send("⚠️ User doesn't have that role.")
+                return
+
+            try:
+                await member.remove_roles(
+                    role, reason=f"Role removed by {context.author}"
+                )
+            except discord.Forbidden:
+                await context.send(
+                    "❌ Discord denied that role change. Check the role hierarchy."
+                )
+                return
+            except discord.HTTPException:
+                await context.send("❌ Discord failed to update that user's roles.")
+                return
+
+            await context.send(f"❌ Removed **{role.name}** from {member.mention}")
+            return
+
+        await context.send("⚠️ Use `add` or `remove`.")
+
+    @role.error
+    async def role_error(self, context: Context, error) -> None:
+        if isinstance(error, commands.MissingPermissions):
+            await context.send("❌ You need `Manage Roles` permission to use this command.")
+        elif isinstance(error, commands.RoleNotFound):
+            await context.send("❌ Role not found.")
+        elif isinstance(error, commands.MemberNotFound):
+            await context.send("❌ Member not found.")
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await context.send("❌ Usage: `!role @member <add|remove> <role>`")
+        else:
+            await context.send("❌ Something went wrong.")
+
+    @commands.hybrid_command(
+        name="mute",
+        description="Timeout a user for a set duration.",
+    )
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    @app_commands.describe(
+        user="The user that should be timed out.",
+        duration="How long the timeout should last (e.g. 10m, 2h30m, 1d).",
+        reason="The reason why the user should be timed out.",
+    )
+    async def mute(
+        self,
+        context: Context,
+        user: discord.User,
+        duration: str,
+        *,
+        reason: str = "Not specified",
+    ) -> None:
+        """
+        Timeout a user for a set duration.
+
+        :param context: The hybrid command context.
+        :param user: The user that should be timed out.
+        :param duration: The timeout duration (e.g. 10m, 2h30m, 1d).
+        :param reason: The reason for the timeout. Default is "Not specified".
+        """
+        guild_me = context.guild.me or await context.guild.fetch_member(self.bot.user.id)
+        member = await context.guild.fetch_member(user.id)
+        seconds = self.parse_duration(duration)
+
+        if seconds < 1:
+            embed = discord.Embed(
+                description="Invalid duration. Use values like `30s`, `10m`, `2h30m`, or `1d`.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if seconds > 2419200:
+            embed = discord.Embed(
+                description="The maximum timeout duration is 28 days.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if member.guild_permissions.administrator:
+            embed = discord.Embed(
+                description="User has administrator permissions.", color=0xE02B2B
+            )
+            await context.send(embed=embed)
+            return
+
+        if member == context.author:
+            embed = discord.Embed(
+                description="You cannot mute yourself.", color=0xE02B2B
+            )
+            await context.send(embed=embed)
+            return
+
+        if member.top_role >= guild_me.top_role:
+            embed = discord.Embed(
+                description="I cannot mute that user because their top role is equal to or higher than mine.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if (
+            member.top_role >= context.author.top_role
+            and context.author.id != context.guild.owner_id
+        ):
+            embed = discord.Embed(
+                description=f"You cannot mute **{member}** because their highest role (`{member.top_role}`) is equal to or higher than your highest role (`{context.author.top_role}`).",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        try:
+            until = discord.utils.utcnow() + timedelta(seconds=seconds)
+            await member.timeout(until, reason=reason)
+            embed = discord.Embed(
+                description=f"**{member}** was muted by **{context.author}** for **{duration}**.",
+                color=0xBEBEFE,
+            )
+            embed.add_field(name="Reason:", value=reason)
+            await context.send(embed=embed)
+            try:
+                await member.send(
+                    f"You were muted by **{context.author}** in **{context.guild.name}** for **{duration}**.\nReason: {reason}"
+                )
+            except:
+                pass
+        except Exception:
+            embed = discord.Embed(
+                description="An error occurred while trying to mute the user.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="unmute",
+        description="Remove a user's timeout.",
+    )
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    @app_commands.describe(
+        user="The user whose timeout should be removed.",
+        reason="The reason why the timeout should be removed.",
+    )
+    async def unmute(
+        self, context: Context, user: discord.User, *, reason: str = "Not specified"
+    ) -> None:
+        """
+        Remove a user's timeout.
+
+        :param context: The hybrid command context.
+        :param user: The user whose timeout should be removed.
+        :param reason: The reason for removing the timeout. Default is "Not specified".
+        """
+        guild_me = context.guild.me or await context.guild.fetch_member(self.bot.user.id)
+        member = await context.guild.fetch_member(user.id)
+
+        if member.is_timed_out() is False:
+            embed = discord.Embed(
+                description="That user is not currently muted.", color=0xE02B2B
+            )
+            await context.send(embed=embed)
+            return
+
+        if member.top_role >= guild_me.top_role:
+            embed = discord.Embed(
+                description="I cannot unmute that user because their top role is equal to or higher than mine.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if (
+            member.top_role >= context.author.top_role
+            and context.author.id != context.guild.owner_id
+        ):
+            embed = discord.Embed(
+                description=f"You cannot unmute **{member}** because their highest role (`{member.top_role}`) is equal to or higher than your highest role (`{context.author.top_role}`).",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        try:
+            await member.timeout(None, reason=reason)
+            embed = discord.Embed(
+                description=f"**{member}** was unmuted by **{context.author}**.",
+                color=0xBEBEFE,
+            )
+            embed.add_field(name="Reason:", value=reason)
+            await context.send(embed=embed)
+            try:
+                await member.send(
+                    f"Your mute was removed by **{context.author}** in **{context.guild.name}**.\nReason: {reason}"
+                )
+            except:
+                pass
+        except Exception:
+            embed = discord.Embed(
+                description="An error occurred while trying to unmute the user.",
                 color=0xE02B2B,
             )
             await context.send(embed=embed)

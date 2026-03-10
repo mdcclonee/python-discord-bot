@@ -10,6 +10,8 @@ import platform
 import random
 import asyncio
 import re
+from datetime import timedelta
+from typing import Optional
 
 import aiohttp
 import discord
@@ -36,6 +38,10 @@ class FeedbackForm(discord.ui.Modal, title="Feeedback"):
 class General(commands.Cog, name="general"):
     def __init__(self, bot) -> None:
         self.bot = bot
+        if not hasattr(self.bot, "pending_reminders"):
+            self.bot.pending_reminders = {}
+        if not hasattr(self.bot, "next_reminder_id"):
+            self.bot.next_reminder_id = 1
         self.context_menu_user = app_commands.ContextMenu(
             name="Grab ID", callback=self.grab_id
         )
@@ -44,6 +50,60 @@ class General(commands.Cog, name="general"):
             name="Remove spoilers", callback=self.remove_spoilers
         )
         self.bot.tree.add_command(self.context_menu_message)
+
+    async def find_command(
+        self, context: Context, command_name: str
+    ) -> Optional[commands.Command]:
+        command_name = command_name.strip().lower()
+        for command in self.bot.walk_commands():
+            if command.cog_name == "owner" and not (
+                await self.bot.is_owner(context.author)
+            ):
+                continue
+            if command.qualified_name.lower() == command_name:
+                return command
+            if command.name.lower() == command_name:
+                return command
+        return None
+
+    @staticmethod
+    def parse_reminder_time(reminder_time: str) -> int:
+        seconds = 0
+        normalized_time = reminder_time.lower().replace(" ", "")
+        matches = re.findall(r"(\d+)([hms]?)", normalized_time)
+        if not matches:
+            return 0
+
+        parsed_length = sum(len(value) + len(unit) for value, unit in matches)
+        if parsed_length != len(normalized_time):
+            return 0
+
+        for value, unit in matches:
+            if unit == "h":
+                seconds += int(value) * 3600
+            elif unit == "m":
+                seconds += int(value) * 60
+            else:
+                seconds += int(value)
+
+        return seconds
+
+    async def deliver_reminder(self, reminder_id: int) -> None:
+        reminder = self.bot.pending_reminders.get(reminder_id)
+        if reminder is None:
+            return
+
+        try:
+            await asyncio.sleep(reminder["seconds"])
+            await reminder["channel"].send(
+                f"<@{reminder['user_id']}>, reminder: **{reminder['message']}**!"
+            )
+        except asyncio.CancelledError:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        finally:
+            self.bot.pending_reminders.pop(reminder_id, None)
 
     # Message context menu command
     async def remove_spoilers(
@@ -105,6 +165,56 @@ class General(commands.Cog, name="general"):
             embed.add_field(
                 name=i.capitalize(), value=f"```{help_text}```", inline=False
             )
+        await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="use",
+        description="Show how to use a specific command.",
+    )
+    @app_commands.describe(command_name="The command you want help with.")
+    async def use_command(self, context: Context, *, command_name: str) -> None:
+        """
+        Show how to use a specific command.
+
+        :param context: The hybrid command context.
+        :param command_name: The command to explain.
+        """
+        command = await self.find_command(context, command_name)
+        if command is None:
+            embed = discord.Embed(
+                description=f"I couldn't find a command named `{command_name}`.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        prefix_usage = f"{context.clean_prefix}{command.qualified_name}"
+        if command.signature:
+            prefix_usage = f"{prefix_usage} {command.signature}"
+
+        embed = discord.Embed(
+            title=f"How to use `{command.qualified_name}`",
+            color=0xBEBEFE,
+        )
+        embed.add_field(name="Prefix Usage", value=f"`{prefix_usage}`", inline=False)
+        embed.add_field(
+            name="Slash Usage",
+            value=f"`/{command.qualified_name}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Description",
+            value=command.description or "No description available.",
+            inline=False,
+        )
+
+        if isinstance(command, commands.Group) and command.commands:
+            subcommands = "\n".join(
+                f"`{subcommand.qualified_name}` - {subcommand.description}"
+                for subcommand in command.commands
+            )
+            embed.add_field(name="Subcommands", value=subcommands, inline=False)
+
         await context.send(embed=embed)
 
     @commands.hybrid_command(
@@ -340,9 +450,8 @@ class General(commands.Cog, name="general"):
         :param message: The message to be reminded about.
         :param time: The time to wait before the reminder (e.g., 100, 1m30s).
         """
-        seconds = 0
-        matches = re.findall(r"(\d+)([hms]?)", time)
-        if not matches:
+        seconds = self.parse_reminder_time(time)
+        if seconds < 1:
             embed = discord.Embed(
                 description="Invalid time format. Please use seconds (e.g. 100) or format like 1m30s.",
                 color=0xE02B2B,
@@ -350,17 +459,9 @@ class General(commands.Cog, name="general"):
             await context.send(embed=embed)
             return
 
-        for value, unit in matches:
-            if unit == "h":
-                seconds += int(value) * 3600
-            elif unit == "m":
-                seconds += int(value) * 60
-            elif unit == "s" or unit == "":
-                seconds += int(value)
-
-        if seconds > 600:
+        if seconds > 86400:
             embed = discord.Embed(
-                description="The time cap is currently 10 minutes (600 seconds).",
+                description="The time cap is currently 24 hours (86400 seconds).",
                 color=0xE02B2B,
             )
             await context.send(embed=embed)
@@ -374,14 +475,107 @@ class General(commands.Cog, name="general"):
             await context.send(embed=embed)
             return
 
+        reminder_id = self.bot.next_reminder_id
+        self.bot.next_reminder_id += 1
+        due_at = int((discord.utils.utcnow() + timedelta(seconds=seconds)).timestamp())
+        reminder = {
+            "id": reminder_id,
+            "user_id": context.author.id,
+            "message": message,
+            "seconds": seconds,
+            "due_at": due_at,
+            "channel": context.channel,
+            "location": f"#{context.channel}" if context.guild else "Direct Message",
+        }
+        self.bot.pending_reminders[reminder_id] = reminder
+        reminder["task"] = asyncio.create_task(self.deliver_reminder(reminder_id))
+
         embed = discord.Embed(
-            description=f"I will remind you about **{message}** in **{seconds}** seconds.",
+            description=(
+                f"I will remind you about **{message}** in **{seconds}** seconds.\n"
+                f"Reminder ID: `{reminder_id}` (<t:{due_at}:R>)"
+            ),
             color=0xBEBEFE,
         )
         await context.send(embed=embed)
 
-        await asyncio.sleep(seconds)
-        await context.send(f"{context.author.mention}, reminder: **{message}**!")
+    @commands.hybrid_command(
+        name="remindlist",
+        description="List your pending reminders.",
+    )
+    async def remind_list(self, context: Context) -> None:
+        """
+        List the pending reminders created by the current user.
+
+        :param context: The hybrid command context.
+        """
+        reminders = sorted(
+            [
+                reminder
+                for reminder in self.bot.pending_reminders.values()
+                if reminder["user_id"] == context.author.id
+            ],
+            key=lambda reminder: reminder["due_at"],
+        )
+
+        if len(reminders) == 0:
+            embed = discord.Embed(
+                description="You have no pending reminders.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        lines = []
+        for reminder in reminders:
+            message = reminder["message"]
+            if len(message) > 50:
+                message = f"{message[:47]}..."
+            line = (
+                f"`#{reminder['id']}` {message} - <t:{reminder['due_at']}:R> in {reminder['location']}"
+            )
+            if len("\n".join(lines + [line])) > 3500:
+                remaining = len(reminders) - len(lines)
+                lines.append(f"...and {remaining} more reminder(s).")
+                break
+            lines.append(line)
+
+        embed = discord.Embed(
+            title="Pending Reminders",
+            description="\n".join(lines),
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="remindremove",
+        description="Remove one of your pending reminders.",
+    )
+    @app_commands.describe(reminder_id="The ID of the reminder to remove.")
+    async def remind_remove(self, context: Context, reminder_id: int) -> None:
+        """
+        Remove one of the current user's pending reminders.
+
+        :param context: The hybrid command context.
+        :param reminder_id: The ID of the reminder to remove.
+        """
+        reminder = self.bot.pending_reminders.get(reminder_id)
+        if reminder is None or reminder["user_id"] != context.author.id:
+            embed = discord.Embed(
+                description=f"I couldn't find one of your reminders with ID `{reminder_id}`.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        self.bot.pending_reminders.pop(reminder_id, None)
+        reminder["task"].cancel()
+
+        embed = discord.Embed(
+            description=f"Removed reminder `{reminder_id}`: **{reminder['message']}**",
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
 
     @commands.hybrid_command(
         name="quote",

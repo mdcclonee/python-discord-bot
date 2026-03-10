@@ -158,6 +158,20 @@ class Fun(commands.Cog, name="fun"):
         view = RockPaperScissorsView()
         await context.send("Please make your choice", view=view)
 
+    @commands.hybrid_command(
+        name="secretsauce",
+        description="Reveal the secret sauce.",
+    )
+    async def secretsauce(self, context: Context) -> None:
+        """
+        Reveal the secret sauce.
+
+        :param context: The hybrid command context.
+        """
+        await context.send(
+            "Click to reveal the secret sauce:\n||<https://youtu.be/dQw4w9WgXcQ?si=Ru5uPLkVmGI2eff->||"
+        )
+
 
 async def setup(bot) -> None:
     await bot.add_cog(Fun(bot))
