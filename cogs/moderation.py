@@ -447,6 +447,11 @@ class Moderation(commands.Cog, name="moderation"):
 
         try:
             await member.timeout(None, reason=reason)
+            
+            automod = self.bot.get_cog("automod")
+            if automod:
+                automod.clear_user_records(user.id)
+
             embed = discord.Embed(
                 description=f"**{member}** was unmuted by **{context.author}**.",
                 color=0xBEBEFE,
